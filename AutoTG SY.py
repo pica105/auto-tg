@@ -26,9 +26,9 @@ except ImportError:
     print(f"Библиотека pymysql не установлена. Функционал активации будет недоступен.")
 
 NAME = "TelegramAccounts"
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 DESCRIPTION = "Плагин для автовыдачи телеграмм номеров"
-CREDITS = "@exfador // @terop11 + custom @sotrudnikyablok"
+CREDITS = "@exfador + custom @sotrudnikyablok"
 UUID = "b2e3c941-0a5f-4e81-9f2d-7c8a2d6b8e7c"
 SETTINGS_PAGE = False
 
@@ -79,46 +79,59 @@ NOTIFICATIONS_MAP = {
     "lolz_status": "Статус лолза"
 }
 
+SETTINGS_MAP = {
+    "lolz_status": "Чекать статус лолза"
+}
+
 bot = None
 cardinal_instance = None
 config = {}
-check_lolz_status = False
 
 def background_check_lolz_api(c):
     while True:
-        global check_lolz_status
-        headers = {
-            "accept": "application/json",
-            "authorization": f"Bearer {config['lolz_token']}"
-            }
-        url = "https://prod-api.lzt.market/me"
-        response = requests.get(url, headers=headers)
-        logger.info(f"{LOGGER_PREFIX} Запрос к API LOLZ Market: {url}")
+        if config["check_lolz_status"] == 1:
+            headers = {
+                "accept": "application/json",
+                "authorization": f"Bearer {config['lolz_token']}"
+                }
+            url = "https://prod-api.lzt.market/me"
+            response = requests.get(url, headers=headers)
+            logger.info(f"{LOGGER_PREFIX} Запрос к API LOLZ Market: {url}")
 
-        if not response.status_code == 200:
-            check_lolz_status = True
-            html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
-            elems = html.find_all('a', {"class": "tc-item"})
-            if not elems: html.find_all('a', {"class": "tc-item warning"})
-            lots = [int(id['data-offer']) for id in elems] if True else elems
-            for lot in lots:
-                fields = c.account.get_lot_fields(lot)
-                fields.active = False
-                c.account.save_lot(fields)
-            if "lolz_status" in config["notifications"]:
-                notify_admins("⚠️ В ходе проверки апи лолза, выявилась ошибка!\nЛоты категории Телеграм были скрыты.")
+            if not response.status_code == 200:
+                html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
+                elems = html.find_all('a', {"class": "tc-item"})
+                if not elems: html.find_all('a', {"class": "tc-item warning"})
+                lots = [int(id['data-offer']) for id in elems] if True else elems
+                for lot in lots:
+                    fields = c.account.get_lot_fields(lot)
+                    fields.active = False
+                    c.account.save_lot(fields)
+                if config["lolz_status"] == 0:
+                    config["lolz_status"] = 1
+                    save_config()
+                    if "lolz_status" in config["notifications"]:
+                        notify_admins("⚠️ В ходе проверки апи лолза, выявилась ошибка!\nЛоты категории Телеграм были скрыты.")
+                    else:
+                        pass
+                else:
+                    pass
             else:
-                pass
+                html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
+                elems = html.find_all('a', {"class": "tc-item"})
+                if not elems: html.find_all('a', {"class": "tc-item warning"})
+                lots = [int(id['data-offer']) for id in elems] if True else elems
+                for lot in lots:
+                    fields = c.account.get_lot_fields(lot)
+                    fields.active = True
+                    c.account.save_lot(fields)
+                if config["lolz_status"] == 1:
+                    config["lolz_status"] = 0
+                    save_config()
+                else:
+                    pass
         else:
-            check_lolz_status = False
-            html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
-            elems = html.find_all('a', {"class": "tc-item"})
-            if not elems: html.find_all('a', {"class": "tc-item warning"})
-            lots = [int(id['data-offer']) for id in elems] if True else elems
-            for lot in lots:
-                fields = c.account.get_lot_fields(lot)
-                fields.active = True
-                c.account.save_lot(fields)
+            pass
         time.sleep(300)
 
 
@@ -208,6 +221,8 @@ def ensure_config_exists():
         default_config = {
             "countries": {},
             "notifications": [],
+            "settings": [],
+            "lolz_status": 0,
             "administrators": [],
             "auto_returns": True,
             "lolz_token": "",
@@ -230,6 +245,18 @@ def ensure_config_exists():
 
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f_write:
                 json.dump(config_data, f_write, ensure_ascii=False, indent=4)
+
+        if "notifications" not in config_data:
+            logger.info(f"{LOGGER_PREFIX} Добавление поля notifications по умолчанию")
+            config_data["notifications"] = []
+
+        if "settings" not in config_data:
+            logger.info(f"{LOGGER_PREFIX} Добавление поля settings по умолчанию")
+            config_data["settings"] = []
+
+        if "lolz_status" not in config_data:
+            logger.info(f"{LOGGER_PREFIX} Добавление поля lolz_status по умолчанию")
+            config_data["lolz_status"] = 0
 
         if "origins" not in config_data:
             logger.info(f"{LOGGER_PREFIX} Добавление поля origins по умолчанию")
@@ -345,6 +372,41 @@ def set_origin(call: types.CallbackQuery):
 
     show_tg_settings_callback(call)
 
+def set_setting(call: types.CallbackQuery):
+    """Хуйня какая то, но я шарю вродь 2"""
+    selected_settings = config["settings"]
+
+    setting_code = call.data.replace("tg_set_setting_", "")
+
+    if setting_code in selected_settings:
+        config["settings"].remove(setting_code)
+        action_text = "удалены"
+    else:
+        config["settings"].append(setting_code)
+        action_text = "добавлены"
+
+    save_config()
+    bot.answer_callback_query(call.id, f"Настройки по '{SETTINGS_MAP[setting_code]}' {action_text}")
+
+    show_tg_settings_callback(call)
+
+def set_notification(call: types.CallbackQuery):
+    """Хуйня какая то, но я шарю вродь"""
+    selected_notifications = config["notifications"]
+
+    notification_code = call.data.replace("tg_set_notification_", "")
+
+    if notification_code in selected_notifications:
+        config["notifications"].remove(notification_code)
+        action_text = "удалено"
+    else:
+        config["notifications"].append(notification_code)
+        action_text = "добавлено"
+
+    save_config()
+    bot.answer_callback_query(call.id, f"Уведомления по '{NOTIFICATIONS_MAP[notification_code]}' {action_text}")
+
+    show_tg_settings_callback(call)
 
 def import_existing_orders(c: Cardinal):
     """Импортирует существующие заказы и их номера в систему сохранения данных"""
@@ -458,8 +520,10 @@ def init_commands(c_: Cardinal):
             add_admin(call)
         elif call.data.startswith("tg_set_origin_"):
             set_origin(call)
-        elif call.data == "tg_set_notification_lolz_status":
-            set_notification_lolz_status(call)
+        elif call.data.startswith("tg_set_notification_"):
+            set_notification(call)
+        elif call.data.startswith("tg_set_setting_"):
+            set_setting(call)
         elif call.data == "tg_setup_plugin":
             plugin_setup_menu(call)
         elif call.data == "tg_back_to_main":
@@ -1047,27 +1111,9 @@ def init_commands(c_: Cardinal):
         except:
             bot.send_message(message.chat.id, "vsemu pizda", reply_markup=kb)
 
-    @bot.callback_query_handler(func=lambda call: call.data == "tg_set_notification_lolz_status")
-    def set_notification_lolz_status(call: types.CallbackQuery):
-        selected_notifications = config["notifications"]
-
-        notification_code = "lolz_status"
-
-        if notification_code in selected_notifications:
-            config["notifications"].remove(notification_code)
-            action_text = "удалено"
-        else:
-            config["notifications"].append(notification_code)
-            action_text = "добавлено"
-
-        save_config()
-        bot.answer_callback_query(call.id, f"Уведомления по '{NOTIFICATIONS_MAP[notification_code]}' {action_text}")
-
-        notifications_menu(call)
-
     @bot.callback_query_handler(func=lambda call: call.data == "tg_notifications")
     def notifications_menu(call: types.CallbackQuery):
-
+        """Меню настройки уведомлений"""
         kb = InlineKeyboardMarkup(row_width=1)
 
         selected_notifications = config["notifications"]
@@ -1098,19 +1144,28 @@ def init_commands(c_: Cardinal):
     def plugin_setup_menu(call: types.CallbackQuery):
         """Меню настройки плагина"""
         kb = InlineKeyboardMarkup(row_width=1)
-        kb.add(InlineKeyboardButton("🔙 Назад", callback_data="tg_back_to_main"))
 
-        message_text = (
-            "⚙️ <b>Настройка плагина</b>\n\n"
-            "Текущая функциональность плагина еще будет расширяться в следующих версиях."
-        )
+        selected_settings = config["settings"]
 
+        for setting_code, setting_name in SETTINGS_MAP.items():
+            callback_data = f"tg_set_setting_{setting_code}"
+            if setting_code in selected_settings:
+                mark = "✅ "
+            else:
+                mark = "☑️ "
+
+            kb.add(InlineKeyboardButton(f"{mark}{setting_name}", callback_data=callback_data))
+            logger.info(f"{LOGGER_PREFIX} Добавлена кнопка: {setting_name} с callback_data: {callback_data}")
+
+        kb.add(InlineKeyboardButton("🔄 Сохранить и вернуться", callback_data="tg_back_to_main"))
         bot.edit_message_text(
-            message_text,
+            "⚙️ <b>Настройка плагина</b>\n\n"
+            "Текущая функциональность плагина еще будет расширяться в следующих версиях.\n\n"
+            f"✅ - выбранные типы, нажмите для отмены\n"
+            f"☑️ - доступные типы, нажмите для выбора",
             call.message.chat.id,
             call.message.message_id,
-            reply_markup=kb,
-            parse_mode="HTML"
+            reply_markup=kb
         )
 
     def orders_menu(call: types.CallbackQuery):
