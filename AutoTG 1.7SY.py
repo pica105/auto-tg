@@ -18,6 +18,7 @@ from FunPayAPI.updater.events import NewOrderEvent, NewMessageEvent
 import time
 import uuid
 import hashlib
+from bs4 import BeautifulSoup as bs, PageElement
 
 try:
     import pymysql
@@ -25,7 +26,7 @@ except ImportError:
     print(f"Библиотека pymysql не установлена. Функционал активации будет недоступен.")
 
 NAME = "TelegramAccounts"
-VERSION = "1.7"
+VERSION = "1.7.1"
 DESCRIPTION = "Плагин для автовыдачи телеграмм номеров"
 CREDITS = "@exfador // @terop11 + custom @sotrudnikyablok"
 UUID = "b2e3c941-0a5f-4e81-9f2d-7c8a2d6b8e7c"
@@ -74,9 +75,51 @@ ORIGIN_MAP = {
     "samoreg": "Саморег"
 }
 
+NOTIFICATIONS_MAP = {
+    "lolz_status": "Статус лолза"
+}
+
 bot = None
 cardinal_instance = None
 config = {}
+check_lolz_status = False
+
+def background_check_lolz_api(c):
+    while True:
+        global check_lolz_status
+        headers = {
+            "accept": "application/json",
+            "authorization": f"Bearer {config['lolz_token']}"
+            }
+        url = "https://prod-api.lzt.market/me"
+        response = requests.get(url, headers=headers)
+        logger.info(f"{LOGGER_PREFIX} Запрос к API LOLZ Market: {url}")
+
+        if not response.status_code == 200:
+            check_lolz_status = True
+            html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
+            elems = html.find_all('a', {"class": "tc-item"})
+            if not elems: html.find_all('a', {"class": "tc-item warning"})
+            lots = [int(id['data-offer']) for id in elems] if True else elems
+            for lot in lots:
+                fields = c.account.get_lot_fields(lot)
+                fields.active = False
+                c.account.save_lot(fields)
+            if "lolz_status" in config["notifications"]:
+                notify_admins("⚠️ В ходе проверки апи лолза, выявилась ошибка!\nЛоты категории Телеграм были скрыты.")
+            else:
+                pass
+        else:
+            check_lolz_status = False
+            html = bs(c.account.method("get", f"lots/2424/trade", {}, {}, raise_not_200=True).text, "html.parser")
+            elems = html.find_all('a', {"class": "tc-item"})
+            if not elems: html.find_all('a', {"class": "tc-item warning"})
+            lots = [int(id['data-offer']) for id in elems] if True else elems
+            for lot in lots:
+                fields = c.account.get_lot_fields(lot)
+                fields.active = True
+                c.account.save_lot(fields)
+        time.sleep(300)
 
 
 def show_tg_settings(message: types.Message):
@@ -88,6 +131,7 @@ def show_tg_settings(message: types.Message):
         InlineKeyboardButton("🔄 Автовозвраты", callback_data="tg_auto_returns"),
         InlineKeyboardButton("🔑 LOLZ TOKEN", callback_data="tg_lolz_token"),
         InlineKeyboardButton("📋 Заказы", callback_data="tg_orders"),
+        InlineKeyboardButton("🔔 Уведомления (множественный выбор)", callback_data="tg_notifications"),
         InlineKeyboardButton("💸 Баланс лолз-тима", callback_data="lolz_balance"),
         InlineKeyboardButton("🔍 Настройка происхождений (множественный выбор)", callback_data="tg_origin"),
         InlineKeyboardButton("💬 Шаблоны сообщений", callback_data="tg_message_templates"),
@@ -123,6 +167,7 @@ def show_tg_settings_callback(call: types.CallbackQuery):
         InlineKeyboardButton("🔄 Автовозвраты", callback_data="tg_auto_returns"),
         InlineKeyboardButton("🔑 LOLZ TOKEN", callback_data="tg_lolz_token"),
         InlineKeyboardButton("📋 Заказы", callback_data="tg_orders"),
+        InlineKeyboardButton("🔔 Уведомления (множественный выбор)", callback_data="tg_notifications"),
         InlineKeyboardButton("💸 Баланс лолз-тима", callback_data="lolz_balance"),
         InlineKeyboardButton("🔍 Настройка происхождений (множественный выбор)", callback_data="tg_origin"),
         InlineKeyboardButton("💬 Шаблоны сообщений", callback_data="tg_message_templates"),
@@ -162,6 +207,7 @@ def ensure_config_exists():
     if not os.path.exists(CONFIG_PATH):
         default_config = {
             "countries": {},
+            "notifications": [],
             "administrators": [],
             "auto_returns": True,
             "lolz_token": "",
@@ -349,6 +395,9 @@ def init_commands(c_: Cardinal):
 
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
+    threading.Timer(10, background_check_lolz_api, args=(c_,)).start()
+    #threading.Thread(target=background_check_lolz_api, args=(c_,), daemon=True).start()
+
     threading.Thread(target=import_existing_orders, args=(c_,), daemon=True).start()
 
     threading.Thread(target=process_order_queue, daemon=True).start()
@@ -409,6 +458,8 @@ def init_commands(c_: Cardinal):
             add_admin(call)
         elif call.data.startswith("tg_set_origin_"):
             set_origin(call)
+        elif call.data == "tg_set_notification_lolz_status":
+            set_notification_lolz_status(call)
         elif call.data == "tg_setup_plugin":
             plugin_setup_menu(call)
         elif call.data == "tg_back_to_main":
@@ -421,6 +472,8 @@ def init_commands(c_: Cardinal):
             edit_code_template(call)
         elif call.data == "tg_orders":
             orders_menu(call)
+        elif call.data == "tg_notifications":
+            notifications_menu(call)
         elif call.data == "lolz_check":
             lolz_check_storage(call)
         elif call.data == "tg_more_functions":
@@ -993,6 +1046,53 @@ def init_commands(c_: Cardinal):
                             bot.send_message(message.chat.id, f"Найдено {len(items)} аккаунтов в наличии, все гуд.\nПоиск был по региону {country_code} и {words}", reply_markup=kb)
         except:
             bot.send_message(message.chat.id, "vsemu pizda", reply_markup=kb)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "tg_set_notification_lolz_status")
+    def set_notification_lolz_status(call: types.CallbackQuery):
+        selected_notifications = config["notifications"]
+
+        notification_code = "lolz_status"
+
+        if notification_code in selected_notifications:
+            config["notifications"].remove(notification_code)
+            action_text = "удалено"
+        else:
+            config["notifications"].append(notification_code)
+            action_text = "добавлено"
+
+        save_config()
+        bot.answer_callback_query(call.id, f"Уведомления по '{NOTIFICATIONS_MAP[notification_code]}' {action_text}")
+
+        notifications_menu(call)
+
+    @bot.callback_query_handler(func=lambda call: call.data == "tg_notifications")
+    def notifications_menu(call: types.CallbackQuery):
+
+        kb = InlineKeyboardMarkup(row_width=1)
+
+        selected_notifications = config["notifications"]
+
+        for notification_code, notification_name in NOTIFICATIONS_MAP.items():
+            callback_data = f"tg_set_notification_{notification_code}"
+            if notification_code in selected_notifications:
+                mark = "✅ "
+            else:
+                mark = "☑️ "
+
+            kb.add(InlineKeyboardButton(f"{mark}{notification_name}", callback_data=callback_data))
+            logger.info(f"{LOGGER_PREFIX} Добавлена кнопка: {notification_name} с callback_data: {callback_data}")
+
+        kb.add(InlineKeyboardButton("🔄 Сохранить и вернуться", callback_data="tg_back_to_main"))
+
+        bot.edit_message_text(
+            "🔔 <b>Настройки уведомлений</b>\n\n"
+            "Текущий функционал этой функции будет расширяться в следующих версиях\n\n"
+            f"✅ - выбранные типы, нажмите для отмены\n"
+            f"☑️ - доступные типы, нажмите для выбора",
+            call.message.chat.id,
+            call.message.message_id,
+            reply_markup=kb
+        )
 
     @bot.callback_query_handler(func=lambda call: call.data == "tg_setup_plugin")
     def plugin_setup_menu(call: types.CallbackQuery):
